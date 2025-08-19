@@ -1,0 +1,127 @@
+---
+- name: Crear un compartimento en OCI
+  hosts: localhost
+  collections:
+    - oracle.oci
+  vars:
+    # ansible_python_interpreter: /home/user03/oci-venv/bin/python3
+    # config_file: ~/.oci/config
+    # tenancy: ocid1.tenancy.oc1..aaaaaaaawbf3onb5wwbfdlbr6clebg5fzeu2lk62t3js43rjyk5ybwxavhsa
+    # compartment_name: Compartment_prueba
+    # description: "This is a test to create a compartment"
+
+  tasks:
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          parent_compartment_id: "{{ tenancy }}"
+          access_level: ANY
+          compartment_id_in_subtree: true
+          name: "{{ compartment_name }}"
+        register: result_verify
+      
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## CREAR EL COMPARTIMENTO
+
+    - name: Crear un compartimento
+      oci_identity_compartment:
+        config_file_location: "{{ config_file }}"
+        parent_compartment_id: "{{ tenancy }}"
+        name: "{{ compartment_name }}"
+        description: "{{ description }}"
+        state: present
+      register: result_create
+      when: result_verify.compartments[0].name is not defined and not verify_error | default(false)
+
+##################################################################################
+## EVALUAR RESULTADO DE LAS TAREAS
+
+    - name: Evaluar resultado al tratar de crear un compartimento en OCI
+      set_fact:
+        resultTarea: >-
+          {%- if result_verify.compartments[0].name is not defined and result_create.changed -%}
+            SUCCESSFUL
+          {%- else -%}
+            ESCALATED
+          {%- endif -%}
+
+##################################################################################
+## MOSTRAR EL RESULTADO FINAL
+
+    - name: Resultado cuando se crea el compartimento en OCI
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_name }}' has been created in OCI"
+              - "Parent compartment ID: {{ tenancy }}"
+              - "Description: {{ description }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL"
+
+    - name: Resultado cuando el compartimento ya existe
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_name }}' already exists"
+              - "Parent compartment ID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].name is defined
+
+    - name: Resultado cuando el ID del padre no es valida
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error creating the compartment '{{ compartment_name }}' "
+              - "The parent ID is not valid: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].name is not defined and verify_error | default(false)
+
+    - name: Resultado cuando existe un error al crear el compartimento
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error creating the compartment '{{ compartment_name }}' "
+              - "Please contact your administrator"
+              - "Parent compartment ID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].name is not defined and not verify_error | default(false) and not result_create.changed
+
+    - name: Resultado cuando existe un error durante toda la ejecucion
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_name }}' could not be created"
+              - "Please contact your administrator"
+              - "Parent compartment ID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].name is not defined and not verify_error | default(false) and result_create.changed

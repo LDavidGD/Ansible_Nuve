@@ -1,0 +1,112 @@
+---
+- name: Buscar y eliminar Autonomous Database por nombre
+  hosts: localhost
+  connection: local
+  collections:
+    - oracle.oci
+
+  # vars:
+  #   compartment_ocid: "ocid1.compartment.oc1..aaaaaaaarf4jt3usj4qep4j2f5he2szbc5ar2nl227kuhvhdppuoyb4klj7a"
+  #   display_name: "test_adb"
+
+  tasks:
+#####################################################################
+# VALIDACIÓN DE AUTONOMOUS DATABASE EXISTENTE
+    - name: Esperar 5 segundos
+      pause:
+        seconds: 5 
+        
+    - name: Obtener todas las Autonomous Databases del compartimento
+      oracle.oci.oci_database_autonomous_database_facts:
+        compartment_id: "{{ compartment_ocid }}"
+      register: db_info
+
+    - name: Filtrar base de datos por display_name (y que no esté eliminándose)
+      set_fact:
+        filtered_adbs: >-
+          {{
+            db_info.autonomous_databases
+            | selectattr('display_name', 'equalto', display_name)
+            | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'DELETING'])
+            | list
+          }}
+      ignore_errors: yes
+
+    - name: Validar si se encontró una base coincidente
+      set_fact:
+        resultTarea: "ESCALATED"
+      when: filtered_adbs | length == 0
+
+    - name: Tomar el OCID de la primera base encontrada
+      set_fact:
+        adb_ocid: "{{ filtered_adbs[0].id }}"
+      when: filtered_adbs | length > 0
+######################################################################
+# ELIMINACIÓN DE AUTONOMOUS DATABASE
+
+    - name: Eliminar la Autonomous Database encontrada
+      oracle.oci.oci_database_autonomous_database:
+        autonomous_database_id: "{{ adb_ocid }}"
+        state: absent
+        wait: yes
+      register: delete_result
+      when: filtered_adbs | length > 0
+
+    - name: Marcar que se realizó la eliminación
+      set_fact:
+        eliminacion_realizada: true
+      when: delete_result is succeeded
+
+##################################################################
+# EVALUACION DE LAS TAREAS DE ELIMINACIÓN
+
+    - name: Evaluar si la autonomus base fue eliminada
+      set_fact:
+        resultTarea: >-
+          {{ 'SUCCESSFUL' if eliminacion_realizada | default(false) else 'ESCALATED' }}
+      when: filtered_adbs | length > 0
+
+    - name: Mostrar resultado de la eliminación
+      debug:
+        var: resultTarea
+      ignore_errors: yes
+
+###################################################################
+# RESULTADO FINAL DE LA ELIMINACIÓN
+    - name: Reporte de eleminacion exitosamente de Autonomous Database
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTarea }}"
+          - "Autonomous Database '{{ display_name }}'"
+          - "compartment: '{{ adb_ocid }})' was deleted."
+      when:
+        - resultTarea == 'SUCCESSFUL'
+        - adb_ocid is defined
+      ignore_errors: yes
+
+    - name: Reporte de error en la eliminación de Autonomous Database
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTarea }}"
+          - "Can't eliminate '{{ display_name }}'. was eliminated previously."
+          - "Please contact your administrator to resolve this issue."
+      when: resultTarea == 'ESCALATED' and adb_ocid is not defined
+      ignore_errors: yes
+
+    - name: Error desconocido en la eliminación de Autonomous Database
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTarea }}"
+          - "Unknown error occurred while trying to delete Autonomous Database '{{ display_name }}'" 
+          - "compartment: {{ adb_ocid }})."
+          - "Please contact your administrator to resolve this issue."
+      when:
+        - resultTarea == 'ESCALATED'
+        - adb_ocid is defined
+      ignore_errors: yes

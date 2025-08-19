@@ -1,0 +1,99 @@
+- hosts: localhost
+
+  vars:
+    #region: us-east-1 
+    #aws_access_key: 
+    #aws_secret_key: 
+#    - nombre_instancia: prueba
+    
+
+  tasks:
+    - name: Verificar si la instancia existe mediante AWS CLI
+      shell: >
+        aws lightsail get-instances --region "{{ region }}" --query "instances[?name=='{{ instance_name }}']" --output json
+      register: instance_info
+      failed_when: false
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ aws_access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ aws_secret_key }}"
+
+    - debug: var=instance_info 
+
+    - name: Determinar si la instancia existe
+      set_fact:
+        instancia_existe: "{{ instance_info.stdout | from_json | length > 0 }}"
+
+
+    - name: Establecer escalado si no existe la instancia
+      set_fact:
+        resultTarea: "ESCALATED"
+      when: instancia_existe is not defined or instancia_existe == false
+
+    - name: Eliminar la instancia si existe
+      lightsail:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        state: absent
+        region: "{{ region }}"
+        name: "{{ instance_name }}"
+      register: delete_instance
+      when: instancia_existe == true
+      ignore_errors: yes
+
+    - name: Evaluar resultado de la eliminación
+      set_fact:
+        resultTarea: >-
+          {{ (
+            'SUCCESSFUL' if delete_instance.changed and not delete_instance.failed
+            else 'ESCALATED'
+          ) | trim }}
+      when: instancia_existe == true
+
+    - name: Normalizar resultado
+      set_fact:
+        resultTarea: "{{ resultTarea | trim }}"
+      ignore_errors: yes
+
+    - debug: var=resultTarea
+      ignore_errors: yes
+
+#################################################################################
+## RESULTADO DE LA DE TAREA EJECUTADA ES EXITOSA
+
+    - name: Resultado de la tarea cuando es Exitoso
+      block:
+        - name: Muestra el Resultado
+          debug:
+            msg:
+              -  "RESULTADO-AUTOMATION"
+              -  "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The instance {{ instance_name }} has been deleted"
+          ignore_errors: yes
+      when: resultTarea | trim == "SUCCESSFUL" and not (instancia_existe is not defined or instancia_existe == false)
+
+
+    - name: Resultado de error general
+      block:
+        - name: Muestra el Resultado
+          debug:
+            msg:
+              - "RESULTADO-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "ERROR: The instance '{{ instance_name }}' could not be deleted due to an unexpected issue."
+              - "Please check the AWS console for more details or contact your administrator."
+          ignore_errors: yes
+      when: resultTarea | trim == "ESCALATED" and instancia_existe is defined and instancia_existe == true
+
+    - name: Resultado de la tarea cuando no existe la instancia
+      block:
+        - name: Muestra el Resultado
+          debug:
+            msg:
+              -  "RESULTADO-AUTOMATION"
+              -  "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "ERROR: Instance '{{ instance_name }}' does not exist, nothing to delete"
+          ignore_errors: yes
+      when: resultTarea == "ESCALATED" and instancia_existe is not defined or instancia_existe == false

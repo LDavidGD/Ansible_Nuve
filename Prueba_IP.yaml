@@ -1,0 +1,109 @@
+- name: Generar Reporte de Instancias OCI
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+
+    tenancy: "ocid1.tenancy.oc1..aaaaaaaawbf3onb5wwbfdlbr6clebg5fzeu2lk62t3js43rjyk5ybwxavhsa"
+    user_id: "ocid1.user.oc1..aaaaaaaamt5ytud2yababvk3ukwa7uw2ojmg7na3cz7c6mn2h2i4higjkfjq"
+    region: "mx-queretaro-1"
+    fingerprint: "50:92:67:c3:71:71:d0:91:d8:67:76:e4:e0:2e:2a:d4"
+    key_file: "/home/automation/.oci/oci_api_key.pem"
+    compartment_name: "ocid1.compartment.oc1..aaaaaaaac7sgn7wjkky37kije5ealajcvemcaovz67ilohxr7tjbiqmk2trq"
+ 
+
+  tasks:
+    - name: Obtener lista de todas las instancias de cómputo en el compartimento
+      oracle.oci.oci_compute_instance_facts:
+        compartment_id: "{{ compartment_name }}"
+      register: instances_result
+
+    - name: Mostrar resultado de instancias (debug opcional)
+      debug: var=instances_result.instances
+
+    - name: Crear contenido del reporte cuando HAY instancias
+      set_fact:
+        report_content: |
+          OCI Instances Report
+          ------------------------------------------
+          Compartment: {{ compartment_name }}
+          {% for instance in instances_result.instances %}
+          Name: {{ instance.display_name }}
+          Status: {{ instance.lifecycle_state }}
+          Availability Domain: {{ instance.availability_domain }}
+          Shape: {{ instance.shape }}
+          Memory (GB): {{ instance.shape_config.memory_in_gbs | default('N/A') }}
+          CPUs: {{ instance.shape_config.ocpus | default('N/A') }}
+          Private IP Address: {{ instance.primary_private_ip | default('N/A') }}
+          Public IP Address: {{ instance.primary_public_ip | default('N/A') }}
+          Creation Date: {{ instance.time_created }}
+          Enabled Plugins:
+          {% if instance.agent_config.plugins_config %}
+            {% for plugin in instance.agent_config.plugins_config %}
+              - {{ plugin.name }} : {{ plugin.desired_state }}
+            {% endfor %}
+          {% else %}
+            No plugins configured
+          {% endif %}
+          ------------------------------------------
+          {% endfor %}
+      when: instances_result.instances | length > 0
+
+    - name: Crear contenido del reporte cuando NO HAY instancias
+      set_fact:
+        report_content: |
+          OCI Instances Report
+          ------------------------------------------
+          No instance information found in your compartment: {{ compartment_name }}
+      when: instances_result.instances | length == 0
+
+    - name: Mostrar el contenido del reporte en consola (formateado)
+      debug:
+        msg: "{{ report_content.split('\n') }}"
+
+
+    - name: Extraer la variable del reporte
+      set_fact:
+        report_result: "{{ report_content.split('\n') }}"
+      when: instances_result.instances | length > 0 or instances_result.instances | length == 0
+
+    - debug: 
+        var: report_result
+
+    # Evaluar el resultado de la tarea en Linux
+    - name: Evaluar resultado tarea Linux
+      set_fact:
+        resultTarea: >-
+          {{ 'SUCCESSFUL' if (instances_result.instances | length > 0) else 'ESCALATED' }}
+      when: instances_result.instances | length > 0 or instances_result.instances | length == 0
+
+    - debug:
+        var: resultTarea
+      when: instances_result.instances | length > 0 or instances_result.instances | length == 0
+
+    ##########################
+    ## RESULTADO DE LA TAREA EJECUTADA EN LINUX ##
+    ##########################
+    - name: Resultado de la tarea cuando es Exitoso en Linux
+      block:
+        - name: Muestra el Resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "{{ report_result }}"
+          ignore_errors: yes
+      when: resultTarea == "SUCCESSFUL" and instances_result.instances | length > 0
+
+    - name: Resultado de la tarea cuando es Fallido en Linux
+      block:
+        - name: Muestra el Resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "{{ report_result }}"
+          ignore_errors: yes
+      when: resultTarea == "ESCALATED" and instances_result.instances | length == 0

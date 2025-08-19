@@ -1,0 +1,233 @@
+---
+- name: Consulta de una IP publica en OCI
+  hosts: localhost
+  collections:
+    - oracle.oci
+  vars:
+    # ansible_python_interpreter: /home/user03/oci-venv/bin/python3
+    # config_file: ~/.oci/config
+    # compartment_id: ocid1.compartment.oc1..aaaaaaaac7sgn7wjkky37kije5ealajcvemcaovz67ilohxr7tjbiqmk2trq
+    # activate_compartment_name: false
+    # tenancy: ocid1.tenancy.oc1..aaaaaaaawbf3onb5wwbfdlbr6clebg5fzeu2lk62t3js43rjyk5ybwxavhsa
+    # compartment_name: TestVMs
+
+  tasks:
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO USANDO SU ID
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          compartment_id: "{{ compartment_id }}"
+        register: result_verify
+        when: activate_compartment_name | bool == false
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO POR SU NOMBRE USANDO EL ID DEL PADRE
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          parent_compartment_id: "{{ tenancy }}"
+          access_level: ANY
+          compartment_id_in_subtree: true
+          name: "{{ compartment_name }}"
+        register: result_verify_name
+        when: activate_compartment_name | bool == true
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## ASIGNAR VARIABLE DEL ID DEL COMPARTIMENTO OBJETIVO A CONSULTAR
+
+    - name: Tratar de declarar la variable
+      block:
+      - set_fact:
+          compartment_id: "{{ result_verify_name.compartments[0].id }}"
+        when: result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true
+
+      rescue:
+        - name: Marcar error al declarar la variable
+          set_fact:
+              verify_value: true
+
+##################################################################################
+## REALIZAR LA CONSULTA DE LAS IPs PUBLICAS DE UN COMPARTIMENTO
+
+    - name: Tratar de realizar una consultar
+      block:
+      - name: Consulta de IPs publicas
+        oci_compute_instance_facts:
+          compartment_id: "{{ compartment_id }}"
+        register: result_check_list
+        when: (result_verify_name.compartments[0].name is defined or result_verify.compartments[0].id is defined) and not verify_error | default(false) and not verify_value | default(false)
+
+      rescue:
+        - name: Marcar error al realizar consulta
+          set_fact:
+            verify_query: true
+
+##################################################################################
+## CREAR REPORTE DEL CONTENIDO DEL COMPARTIMENTO
+
+    - name: Crear contenido del reporte cuando HAY instancias
+      set_fact:
+        report_content: |
+          OCI Instances Report
+          ------------------------------------------
+          {% for instance in result_check_list.instances %}
+          Name: {{ instance.display_name }}
+          OCID: {{ instance.id }}
+          Public IP Address: {{ instance.primary_public_ip | default('N/A') }}
+          Region: {{ instance.region }}
+          ------------------------------------------
+          {% endfor %}
+      when: result_check_list | default(false) and (result_verify_name.compartments[0].name is defined or result_verify.compartments[0].id is defined) and not verify_error | default(false)
+
+##################################################################################
+## EVALUAR RESULTADO DE LAS TAREAS
+
+    - name: Evaluar resultado al tratar de consultar IPs de un compartimento en OCI
+      set_fact:
+        resultTarea: >-
+          {%- if result_verify.compartments[0].id is defined and result_check_list.instances | length > 0 -%}
+            SUCCESSFUL
+          {%- elif result_verify_name.compartments[0].name is defined and result_check_list.instances | length > 0 -%}
+            SUCCESSFUL
+          {%- else -%}
+            ESCALATED
+          {%- endif -%}
+
+##################################################################################
+## MOSTRAR EL RESULTADO FINAL
+
+    - name: Resultado cuando se obtiene las IPs publicas del compartimento por su ID en OCI
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg: 
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "Compartment: {{ result_verify.compartments[0].name }}"
+              - "OCID: {{ compartment_id }}"
+              - "The compartment has the following information:"
+              - "{{ report_content.split('\n') }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == false
+
+    - name: Resultado cuando se obtiene las IPs publicas del compartimento por su nombre en OCI
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "Compartment: {{ compartment_name }}"
+              - "OCID: {{ result_verify_name.compartments[0].id }}"
+              - "The compartment has the following information:"
+              - "{{ report_content.split('\n') }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == true
+
+    - name: Resultado cuando el compartimento no existe por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "The compartment '{{ compartment_id }}' does not exist"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is not defined and activate_compartment_name | bool == false
+
+    - name: Resultado cuando existe un error al realizar la consulta por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "An error occurred while querying the compartment '{{ compartment_id }}'"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is not defined and activate_compartment_name | bool == false and verify_query | default(false)
+
+    - name: Resultado cuando el compartimento por nombre no existe 
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "The compartment '{{ compartment_name }}' does not exist"
+              - "Parent OCID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and activate_compartment_name | bool == true and not verify_error | default(false) and not verify_value | default(false) and not verify_query | default(false)
+
+    - name: Resultado cuando el ID del padre no es valida
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "An error occurred while querying the compartment '{{ compartment_name }}' "
+              - "The parent ID is not valid: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and verify_error | default(false) and activate_compartment_name | bool == true
+
+    - name: Resultado cuando existe un error al realizar la consulta del compartimento por su nombre
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "An error occurred while querying the compartment '{{ compartment_name }}'"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true and verify_query | default(false)
+
+    - name: Resultado cuando existe un error durante el proceso de ejecucion
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "OCI Instances Report"
+              - "------------------------------------------"
+              - "No instance information found in your compartment: {{ compartment_name }}"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and ((result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true and not verify_query | default(false)) or (result_verify_name.compartments[0].id is defined and not verify_error | default(false) and activate_compartment_name | bool == false and not verify_query | default(false)))

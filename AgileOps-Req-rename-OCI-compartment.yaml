@@ -1,0 +1,225 @@
+---
+- name: Renombrar un compartimento en OCI
+  hosts: localhost
+  collections:
+    - oracle.oci
+  vars:
+    # ansible_python_interpreter: /home/user03/oci-venv/bin/python3
+    # config_file: ~/.oci/config
+    # compartment_id: ocid1.compartment.oc1..aaaaaaaai34nrewddfs76hhng3aryhy4hja4zsal7i7raalbw5tc36ctzepq
+    # description: "This is a test description"
+    # new_name: final_compartment_8
+    # activate_compartment_name: false
+    # tenancy: ocid1.tenancy.oc1..aaaaaaaawbf3onb5wwbfdlbr6clebg5fzeu2lk62t3js43rjyk5ybwxavhsa
+    # current_compartment_name: final
+
+  tasks:
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO A RENOMBRAR USANDO SU ID
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          compartment_id: "{{ compartment_id }}"
+        register: result_verify
+        when: activate_compartment_name | bool == false
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO A RENOMBRAR POR NOMBRE USANDO EL ID DEL PADRE
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          parent_compartment_id: "{{ tenancy }}"
+          access_level: ANY
+          compartment_id_in_subtree: true
+          name: "{{ current_compartment_name }}"
+        register: result_verify_name
+        when: activate_compartment_name | bool == true
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## ASIGNAR VARIABLE DEL ID DEL COMPARTIMENTO OBJETIVO A RENOMBRAR
+
+    - name: Tratar de declarar la variable
+      block:
+      - set_fact:
+          target_compartment_id: "{{ result_verify_name.compartments[0].id }}"
+        when: result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true
+
+      rescue:
+        - name: Marcar error al declarar la variable
+          set_fact:
+              verify_value: true
+
+##################################################################################
+## RENOMBRAR EL COMPARTIMENTO CON SU ID
+
+    - name: Renombrar un compartimento
+      oci_identity_compartment:
+        config_file_location: "{{ config_file }}"
+        compartment_id: "{{ compartment_id }}"
+        name: "{{ new_name }}"
+        description: "{{ description }}"
+        state: present
+      register: result_rename_id
+      when: result_verify.compartments[0].id is defined and not verify_error | default(false) and activate_compartment_name | bool == false
+
+##################################################################################
+## RENOMBRAR EL COMPARTIMENTO POR SU NOMBRE
+
+    - name: Renombrar un compartimento
+      oci_identity_compartment:
+        config_file_location: "{{ config_file }}"
+        compartment_id: "{{ target_compartment_id }}"
+        name: "{{ new_name }}"
+        description: "{{ description }}"
+        state: present
+      register: result_rename_name
+      when: result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true and not verify_value | default(false)
+
+##################################################################################
+## EVALUAR RESULTADO DE LAS TAREAS
+
+    - name: Evaluar resultado al tratar de renombrar un compartimento en OCI
+      set_fact:
+        resultTarea: >-
+          {%- if result_verify.compartments[0].id is defined and result_rename_id.changed -%}
+            SUCCESSFUL
+          {%- elif result_verify_name.compartments[0].name is defined and result_rename_name.changed -%}
+            SUCCESSFUL
+          {%- else -%}
+            ESCALATED
+          {%- endif -%}
+
+##################################################################################
+## MOSTRAR EL RESULTADO FINAL
+
+    - name: Resultado cuando se renombra el compartimento en OCI por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ result_verify.compartments[0].name }}' has been renamed to '{{ new_name }}' in OCI"
+              - "OCID: {{ compartment_id }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == false
+
+    - name: Resultado cuando se renombra el compartimento en OCI por su nombre
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ result_verify_name.compartments[0].name }}' has been renamed to '{{ new_name }}' in OCI"
+              - "Parent OCID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == true
+
+    - name: Resultado cuando el compartimento no existe por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_id }}' does not exist"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is not defined and activate_compartment_name | bool == false
+
+    - name: Resultado cuando existe un error al renombrar el compartimento por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error renaming the compartment '{{ compartment_id }}' to {{ new_name }}"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is  defined and not verify_error | default(false) and not result_rename_id.changed and activate_compartment_name | bool == false
+
+    - name: Resultado cuando el compartimento por nombre no existe 
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ current_compartment_name }}' does not exist"
+              - "Parent OCID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and activate_compartment_name | bool == true and not verify_error | default(false) and not verify_value | default(false)
+
+    - name: Resultado cuando el ID del padre no es valida
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error renaming the compartment '{{ current_compartment_name }}' "
+              - "The parent ID is not valid: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and verify_error | default(false) and activate_compartment_name | bool == true
+
+    - name: Resultado cuando existe un error al renombrar el compartimento por su nombre
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error renaming the compartment '{{ current_compartment_name }}', the comparment could no be renamed"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true and verify_value | default(false)
+
+    - name: Resultado cuando el nombre ingresado es el mismo
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error renaming the compartment '{{ new_name }}', the name already exists"
+              - "Please contact your administrator"          
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is defined and not verify_error | default(false) and not result_rename_name.changed and activate_compartment_name | bool == true and not verify_value | default(false)
+
+    - name: Resultado cuando existe un error durante toda la ejecucion
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_id }}' could not be renamed"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and ((result_verify.compartments[0].name is defined and not verify_error | default(false) and result_rename_id.changed) or (result_verify_name.compartments[0].name is defined and not verify_error | default(false) and not verify_value | default(false) and result_rename_name.changed))

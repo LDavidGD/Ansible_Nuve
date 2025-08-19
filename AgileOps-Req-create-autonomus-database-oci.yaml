@@ -1,0 +1,140 @@
+---
+- name: Simple Autonomous Database creation check
+  hosts: localhost
+  connection: local
+  collections:
+    - oracle.oci
+
+  # vars:
+  #   compartment_ocid: "ocid1.compartment.oc1..aaaaaaaarf4jt3usj4qep4j2f5he2szbc5ar2nl227kuhvhdppuoyb4klj7a"
+  #   display_name: "test_adb"
+  #   db_name: "testdb"
+  #   admin_password: "Str0ngPwd123!"
+  #   cpu_core_count: 1
+  #   data_storage_size_in_tbs: 1
+  #   license_model: "LICENSE_INCLUDED"
+  #   db_workload: "OLTP"
+  #   is_free_tier: true
+  #   whitelisted_ips: ["189.228.56.13"]
+
+  tasks:
+###################################################################
+# VALIDACIÓN DE AUTONOMOUS DATABASE
+    - name: Esperar 10 segundos para asegurar que OCI refleje la eliminación
+      pause:
+        seconds: 10
+
+    - name: Obtener todas las Autonomous Databases del compartimento
+      oracle.oci.oci_database_autonomous_database_facts:
+        compartment_id: "{{ compartment_ocid }}"
+      register: db_info
+      ignore_errors: yes
+
+    - name: Filtrar base de datos por display_name
+      set_fact:
+        filtered_db: >-
+          {{
+            db_info.autonomous_databases
+            | selectattr('display_name', 'equalto', display_name)
+            | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING', 'DELETING', 'STOPPING', 'STOPPED'])
+            | list
+          }}
+      ignore_errors: yes
+
+    # - name: Debug filtered_db entries
+    #   debug:
+    #     var: filtered_db
+    #   ignore_errors: yes
+
+###################################################################
+# CREACIÓN DE AUTONOMOUS DATABASE
+
+    - name: Create Autonomous Database
+      oracle.oci.oci_database_autonomous_database:
+        compartment_id: "{{ compartment_ocid }}"
+        display_name: "{{ display_name }}"
+        db_name: "{{ db_name }}"
+        admin_password: "{{ admin_password }}"
+        cpu_core_count: "{{ cpu_core_count }}"
+        data_storage_size_in_tbs: "{{ data_storage_size_in_tbs }}"
+        license_model: "{{ license_model }}"
+        db_workload: "{{ db_workload }}"
+        is_free_tier: "{{ is_free_tier }}"
+        whitelisted_ips: "{{ whitelisted_ips }}"
+        wait: yes
+      register: result
+      when: filtered_db | length == 0
+      ignore_errors: yes
+
+    - name: Debug Autonomous Database creation result
+      debug:
+        var: result
+
+###################################################################
+# EVALUACIÓN DE LAS TAREAS
+
+    - name: Evaluar si la base de datos fue creada
+      set_fact:
+        resultTareaUsr: >-
+          {{
+            (
+              'SUCCESSFUL'
+              if result is defined and result.autonomous_database is defined and result.autonomous_database.lifecycle_state == 'AVAILABLE'
+              else 'ESCALATED'
+            ) | trim
+          }}
+      ignore_errors: yes
+
+    - debug:
+        var: resultTareaUsr
+      ignore_errors: yes
+
+###################################################################
+# RESULTADO DE LA TAREA EJECUTADA
+
+    - name: Report creation success or failure
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTareaUsr }}"
+          - "-----------------------------------------------"
+          - "Database Name: {{ result.autonomous_database.display_name }}"
+          - "Database OCID: {{ result.autonomous_database.id }}"
+          - "Lifecycle State: {{ result.autonomous_database.lifecycle_state }}"
+          - "Admin Password: {{ admin_password }}"
+          - "Database Workload: {{ result.autonomous_database.db_workload }}"
+          - "Database CPU Core Count: {{ result.autonomous_database.cpu_core_count }}"
+          - "Data Storage Size (TB): {{ result.autonomous_database.data_storage_size_in_tbs }}"
+          - "License Model: {{ result.autonomous_database.license_model }}"
+          - "Is Free Tier: {{ result.autonomous_database.is_free_tier }}"
+          - "Whitelisted IPs: {{ result.autonomous_database.whitelisted_ips }}"
+          - "-------------------------------------------------------"   
+      when: result is defined and result.autonomous_database is defined and resultTareaUsr == 'SUCCESSFUL'
+      ignore_errors: yes
+
+    - name: Fallo en la creacion de la base de datos por la precencia de una base de datos con el mismo nombre
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTareaUsr }}"
+          - "Database with display_name '{{ display_name }}' already exists."
+          - "Please contact your administrator to resolve this issue."
+      when:
+        - resultTareaUsr == 'ESCALATED'
+        - filtered_db | length > 0
+      ignore_errors: yes
+
+    - name: Fallo en la creacion de la base de datos por error desconocido
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTareaUsr }}"
+          - "An unexpected error occurred during database creation."
+          - "Please contact your administrator to resolve this issue."
+      when:
+        - resultTareaUsr == 'ESCALATED'
+        - filtered_db | length == 0
+      ignore_errors: yes

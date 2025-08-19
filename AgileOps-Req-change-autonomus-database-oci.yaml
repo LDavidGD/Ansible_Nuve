@@ -1,0 +1,280 @@
+---
+- name: Cambios en la instancia de Autonomous Database
+  hosts: localhost
+  connection: local
+  collections:
+    - oracle.oci
+
+  vars:
+    db_ocid: "ocid1.autonomousdatabase.oc1.mx-queretaro-1.anyxeljr2vjrkdqalnyosv255nqkzmjpxowzrdtkdtrfcnsajmucq7nbb4yq"
+    compartment_ocid: "ocid1.compartment.oc1..aaaaaaaarf4jt3usj4qep4j2f5he2szbc5ar2nl227kuhvhdppuoyb4klj7a"
+    display_name: "test_adb9"
+    new_name: "test_adb10"
+    overwrite_ips: false # Controla si se sobreescriben las IPs 
+    whitelisted_ips: [189.0.0.114]              # IPs a agregar o setear si overwrite_ips=true
+    add_ips: true                   # Controla si se añaden IPs dependiendo de overwrite_ips
+    change_name: true
+
+  tasks:
+###################################################################
+# VALIDACIÓN DE AUTONOMOUS DATABASE
+    - name: Esperar 10 segundos para asegurar OCI 
+      pause:
+        seconds: 10
+
+    - name: Obtener todas las Autonomous Databases del compartimento
+      oracle.oci.oci_database_autonomous_database_facts:
+        compartment_id: "{{ compartment_ocid }}"
+      register: db_info
+      ignore_errors: yes
+
+    - name: Inicializar name_conflict si no está definido
+      set_fact:
+        name_conflict: false
+      when: name_conflict is not defined
+
+    - name: Inicializar db_exists si no está definido
+      set_fact:
+        db_exists: false
+      when: db_exists is not defined
+
+    - name: Filtrar base de datos por display_name
+      set_fact:
+        filtered_db: >-
+          {{
+            db_info.autonomous_databases
+            | selectattr('display_name', 'equalto', display_name)
+            | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING', 'DELETING', 'STOPPING', 'STOPPED'])
+            | list
+          }}
+      ignore_errors: yes
+
+    - name: Verificar si la base de datos existe
+      set_fact:
+        db_exists: "{{ filtered_db | length > 0 }}"
+      ignore_errors: yes
+
+    - name: Definir current_db si existe
+      set_fact:
+        current_db: "{{ filtered_db[0] }}"
+      when: db_exists
+      ignore_errors: yes
+
+    - name: Verificar si el nuevo nombre ya está en uso
+      set_fact:
+        name_conflict: >-
+          {{
+            db_info.autonomous_databases
+            | selectattr('display_name', 'equalto', new_name)
+            | rejectattr('id', 'equalto', current_db.id | default(''))
+            | rejectattr('lifecycle_state', 'in', ['TERMINATED', 'TERMINATING', 'DELETING', 'STOPPING', 'STOPPED'])
+            | list | length > 0
+          }}
+      when: db_exists
+      ignore_errors: yes
+
+    - name: Convertir current_db.whitelisted_ips a lista segura
+      set_fact:
+        current_whitelist: "{{ current_db.whitelisted_ips if current_db.whitelisted_ips is iterable else [] }}"
+      when: db_exists
+
+    - name: Definir lista deseada de IPs
+      set_fact:
+        desired_whitelist: "{{ whitelisted_ips | default([]) }}"
+      when: db_exists
+
+    - name: Comparar IPs actuales vs nuevas
+      set_fact:
+        ip_change_needed: "{{ (current_whitelist | difference(desired_whitelist)) | length > 0 or (desired_whitelist | difference(current_whitelist)) | length > 0 }}"
+      when: db_exists and not name_conflict
+      ignore_errors: yes
+
+    - name: Unir IPs actuales con nuevas IPs (evitar duplicados)
+      set_fact:
+        updated_whitelisted_ips: "{{ (current_whitelist + desired_whitelist) | unique }}"
+      when: db_exists and not name_conflict and ip_change_needed and desired_whitelist is defined and overwrite_ips == false
+      ignore_errors: yes
+
+    - name: Actualizar IPs si overwrite_ips es verdadero
+      set_fact:
+        updated_whitelisted_ips: "{{ desired_whitelist }}"
+      when: db_exists and not name_conflict and ip_change_needed and overwrite_ips == true
+      ignore_errors: yes
+
+    - name: Verificar si se requiere actualización de IPs
+      set_fact:
+        ip_change_needed: "{{ updated_whitelisted_ips | difference(current_whitelist) | length > 0 }}"
+      when: db_exists and not name_conflict and ip_change_needed
+      ignore_errors: yes
+
+    - name: Verificar si el display_name necesita actualizarse
+      set_fact:
+        name_change_needed: "{{ current_db.display_name != new_name }}"
+      when: db_exists
+      ignore_errors: yes
+
+    - name: Validar si se está intentando actualizar con una lista vacía de IPs
+      fail:
+        msg: >
+          Error: No se puede actualizar la base de datos '{{ display_name }}' con una lista vacía de IPs.
+          Por favor, proporciona al menos una dirección IP o desactiva 'add_ips'.
+      when: 
+        - db_exists
+        - add_ips
+        - ip_change_needed
+        - updated_whitelisted_ips is defined
+        - updated_whitelisted_ips | length == 0
+
+#################################################################
+# ACTUALIZACIÓN DE AUTONOMOUS DATABASE COMPLETA
+
+    - name: Actualizar configuración de la base de datos solo IPs 
+      oracle.oci.oci_database_autonomous_database:
+        autonomous_database_id: "{{ current_db.id }}"
+        whitelisted_ips: "{{ updated_whitelisted_ips | default(current_whitelist) }}"
+        wait: yes
+      register: update_result1
+      when: db_exists and not name_conflict and (ip_change_needed or name_change_needed) and add_ips == true
+      ignore_errors: yes
+      
+    - name: Actualizar configuración de la base de datos solo nombre
+      oracle.oci.oci_database_autonomous_database:
+        autonomous_database_id: "{{ current_db.id }}"
+        display_name: "{{ new_name if name_change_needed else current_db.display_name }}"
+        wait: yes
+      register: update_result2
+      when: db_exists and not name_conflict and name_change_needed and change_name == true
+      ignore_errors: yes
+
+    - name: Consolidar la disponibilidad de cualquiera de los resultados de actualización
+      set_fact:
+        update_result: >-
+          {{
+            update_result1
+            if (update_result1 is defined and
+                (update_result1.autonomous_database.lifecycle_state | default('')) == 'AVAILABLE')
+            else update_result2
+            if (update_result2 is defined and
+                (update_result2.autonomous_database.lifecycle_state | default('')) == 'AVAILABLE')
+            else {}
+          }}
+      when: db_exists and not name_conflict and (ip_change_needed or name_change_needed)
+      ignore_errors: yes
+    
+###################################################################
+# EVALUACIÓN DE LAS TAREAS
+
+    - name: Evaluar si la base de datos fue actualizada exitosamente
+      set_fact:
+        resultTareaUsr: >-
+            {{
+              (
+                'SUCCESSFUL'
+                if update_result is defined and update_result.autonomous_database is defined and update_result.autonomous_database.lifecycle_state == 'AVAILABLE'
+                else 'ESCALATED'
+              ) | trim
+            }}
+
+    - name: Refrescar información de la base de datos actualizada
+      oracle.oci.oci_database_autonomous_database_facts:
+        autonomous_database_id: "{{ current_db.id }}"
+      register: refreshed_db
+      when: resultTareaUsr == 'ESCALATED'
+      ignore_errors: yes
+
+    - name: Revalidar estado actualizado si se detectó como ESCALATED pero fue exitoso
+      set_fact:
+        update_result:
+          autonomous_database: "{{ refreshed_db.autonomous_databases[0] }}"
+        resultTareaUsr: "SUCCESSFUL"
+      when:
+        - refreshed_db is defined
+        - refreshed_db.autonomous_databases[0].lifecycle_state == "AVAILABLE"
+        - refreshed_db.autonomous_databases[0].display_name == new_name
+        - resultTareaUsr == "ESCALATED"
+      ignore_errors: yes
+
+    - debug:
+        var: resultTareaUsr
+      ignore_errors: yes
+
+    - name: Definir updated_whitelisted_ips como lista vacía si no fue definido
+      set_fact:
+        updated_whitelisted_ips: []
+      when: updated_whitelisted_ips is not defined
+
+    - name: Definir current_whitelist como lista vacía si no fue definido
+      set_fact:
+        current_whitelist: []
+      when: current_whitelist is not defined 
+
+    - name: Refrescar información de la base de datos actualizada
+      oracle.oci.oci_database_autonomous_database_facts:
+        autonomous_database_id: "{{ current_db.id }}"
+      register: refreshed_db
+      when: resultTareaUsr == 'ESCALATED' or resultTareaUsr == 'SUCCESSFUL'
+      ignore_errors: yes
+
+###################################################################
+# RESULTADO DE LA TAREA EJECUTADA
+
+    - name: Reporte de éxito en la actualización
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTareaUsr }}"
+          - "-----------------------------------------------"
+          - "Previous Display Name: {{ current_db.display_name }}"
+          - "Current Display Name: {{ display_name if change_name == True else 'N/A' }}"
+          - "Changed Display Name: {{ new_name if change_name == True else 'N/A' }}"
+          - "Database OCID: {{ update_result.autonomous_database.id }}"
+          - "Lifecycle State: {{ update_result.autonomous_database.lifecycle_state }}"
+          - "IPs Added: {{whitelisted_ips[0] if add_ips == True else 'N/A'}}"
+          - "-------------------------------------------------------"
+          - "Access Control List (IP):"
+          - "{{ refreshed_db.autonomous_databases[0].whitelisted_ips | join(', ') if refreshed_db is defined and refreshed_db.autonomous_databases[0].whitelisted_ips is defined else 'No IPs configured or access restricted' }}"
+      when: resultTareaUsr == 'SUCCESSFUL'
+      ignore_errors: yes
+
+    - name: Determinar motivo de escalamiento
+      set_fact:
+        motivoEscalado: >-
+          {{
+            'NO_EXIST' if not db_exists else
+            'NAME_IN_USE' if name_conflict else
+            'EMPTY_IP_LIST' if updated_whitelisted_ips is defined and updated_whitelisted_ips | length == 0 else
+            'UNKNOWN_ERROR'
+          }}
+      when: resultTareaUsr == 'ESCALATED'
+      ignore_errors: yes
+
+    - name: Mostrar motivo de escalamiento
+      debug:
+        msg:
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "Remediation Task Result is: {{ resultTareaUsr }}"
+          - "Escalated motive : {{ motivoEscalado }}"
+          - >-
+            {% if motivoEscalado == 'NO_EXIST' %}
+              The database '{{ display_name }}' does not exist in the compartment.
+            {% elif motivoEscalado == 'NAME_IN_USE' %}
+              The new name '{{ new_name }}' is already in use by another database.
+            {% elif motivoEscalado == 'EMPTY_IP_LIST' %}
+              Cannot update '{{ display_name }}' with an empty list of IPs.
+            {% else %}
+              An unknown error occurred while updating the database.
+            {% endif %}
+          - "Please contact your administrator to resolve this issue."
+      when: resultTareaUsr == 'ESCALATED'
+      ignore_errors: yes
+    - name: No se requieren cambios en la base de datos
+      debug:
+        msg: 
+          - "RESULT-AUTOMATION"
+          - "-------------------------------------------------------"
+          - "No changes needed for Autonomous Database '{{ display_name }}'."
+          - "Please check your configuration or contact your administrator to resolve this issue."
+      when: db_exists and not name_conflict and not ip_change_needed and not name_change_needed
+

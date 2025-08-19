@@ -1,0 +1,90 @@
+####################################################################
+###              AutoRemediation of Ntechnology                  ###
+####################################################################
+
+- hosts: localhost
+  vars:
+    # numero_instancias: 2                         # Define cuántas instancias quieres crear
+    # nombre_base_instancia: MauHernan             # Nombre base de las instancias
+    # blueprintid: ubuntu_22_04                    # Blueprint de sistema operativo
+    # bundleid: micro_3_0                          # Tamaño/configuración de la instancia
+    # region: us-east-1
+    # zone: us-east-1a
+    # aws_access_key:
+    # aws_secret_key:
+  tasks:
+
+###################################################################################
+## REALIZA LA CREACIÓN DE LAS INSTANCIAS EN AWS LIGHTSAIL
+
+  - lightsail:
+      aws_access_key: "{{ aws_access_key }}"
+      aws_secret_key: "{{ aws_secret_key }}"
+      state: present
+      name: "{{ nombre_base_instancia }}{{ '' if item == 1 else item }}"
+      region: "{{ region }}"
+      zone: "{{ zone }}"
+      blueprint_id: "{{ blueprintid }}"
+      bundle_id: "{{ bundleid }}"
+      wait_timeout: 500
+    loop: "{{ range(1, numero_instancias | int + 1) | list }}"
+    register: crea_instance
+    ignore_errors: yes
+
+  - name: Mostrar resultado bruto de creación
+    debug: var=crea_instance
+
+###################################################################################
+## EVALUAR RESULTADO GENERAL (éxito o error)
+
+  - name: Determinar resultado de la tarea
+    set_fact:
+      resultTarea: >-
+        {{ 'SUCCESSFUL' if crea_instance.results[0].failed is not defined or not crea_instance.results[0].failed else 'ESCALATED' }}
+
+  - debug: var=resultTarea
+
+###################################################################################
+## RESULTADO: ÉXITO - Mostrar resultados de todas las instancias creadas
+
+  - name: Armar mensajes limpios de instancias creadas
+    set_fact:
+      resumen_instancias: >-
+        {{
+          resumen_instancias | default([]) +
+          [ "----------------------------------------------------------",
+            "Instance Name: " ~ item.instance.name,
+            "Public IP: " ~ item.instance.public_ip_address,
+            "Number of CPUs: " ~ item.instance.hardware.cpu_count,
+            "RAM: " ~ item.instance.hardware.ram_size_in_gb ~ " GB",
+            "Disk Size: " ~ item.instance.hardware.disks[0].size_in_gb ~ " GB"
+          ]
+        }}
+    loop: "{{ crea_instance.results }}"
+    when: item.failed is not defined or not item.failed
+
+  - name: Mostrar resumen final del resultado y de las instancias
+    debug:
+      msg:
+        - "RESULT-AUTOMATION"
+        - "-------------------------------------------------------"
+        - "Remediation Task Result is: {{ resultTarea }}"
+        - "-------------------------------------------------------"
+        - "{{ resumen_instancias }}"
+
+
+    when: resultTarea == "SUCCESSFUL"
+
+###################################################################################
+## RESULTADO: ERROR - Mostrar mensaje de error
+
+  - name: Resultado de la tarea cuando es Fallida
+    block:
+      - name: Mostrar mensaje de error
+        debug:
+          msg:
+            - "RESULT-AUTOMATION"
+            - "-------------------------------------------------------"
+            - "Remediation Task Result is: {{ resultTarea }}"
+            - "Error message: {{ crea_instance.results[0].message | replace(\"'\", '’') }}"
+    when: resultTarea == "ESCALATED"

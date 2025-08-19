@@ -1,0 +1,193 @@
+---
+- name: Eliminar un compartimento en OCI
+  hosts: localhost
+  collections:
+    - oracle.oci
+  vars:
+    # ansible_python_interpreter: /home/user03/oci-venv/bin/python3
+    # config_file: ~/.oci/config
+    # compartment_id: ocid1.compartment_id.oc1..aaaaaaaak67anpz5576gm6k2hufnrjtymww4ujgaqqzym2yffmj4ka2sgzma
+    # activate_compartment_name: false
+    # tenancy: ocid1.tenancy.oc1..aaaaaaaawbf3onb5wwbfdlbr6clebg5fzeu2lk62t3js43rjyk5ybwxavhsa
+    # compartment_name: prueba
+
+  tasks:
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO A ELIMINAR USANDO SU ID
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          compartment_id: "{{ compartment_id }}"
+        register: result_verify
+        when: activate_compartment_name | bool == false
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## VERIFICAR SI EXISTE EL COMPARTIMENTO A ELIMINAR POR NOMBRE USANDO EL ID DEL PADRE
+
+    - name: Tratar de obtener los compartimentos
+      block:
+      - name: Obtener los compartimentos existentes
+        oci_identity_compartment_facts:
+          config_file_location: "{{ config_file }}"
+          parent_compartment_id: "{{ tenancy }}"
+          access_level: ANY
+          compartment_id_in_subtree: true
+          name: "{{ compartment_name }}"
+        register: result_verify_name
+        when: activate_compartment_name | bool == true
+
+      rescue:
+        - name: Marcar error al obtener compartimentos
+          set_fact:
+            verify_error: true
+
+##################################################################################
+## ELIMINAR EL COMPARTIMENTO CON SU ID
+
+    - name: Eliminar un compartimento
+      oci_identity_compartment:
+        config_file_location: "{{ config_file }}"
+        compartment_id: "{{ compartment_id }}"
+        state: absent
+      register: result_delete_id
+      when: result_verify.compartments[0].id is defined and not verify_error | default(false) and activate_compartment_name | bool == false
+
+##################################################################################
+## ELIMINAR EL COMPARTIMENTO POR SU NOMBRE
+
+    - name: Eliminar un compartimento
+      oci_identity_compartment:
+        config_file_location: "{{ config_file }}"
+        parent_compartment_id: "{{ tenancy }}"
+        name: "{{ compartment_name }}"
+        state: absent
+      register: result_delete_name
+      when: result_verify_name.compartments[0].name is defined and not verify_error | default(false) and activate_compartment_name | bool == true
+
+##################################################################################
+## EVALUAR RESULTADO DE LAS TAREAS
+
+    - name: Evaluar resultado al tratar de eliminar un compartimento en OCI
+      set_fact:
+        resultTarea: >-
+          {%- if result_verify.compartments[0].id is defined and result_delete_id.changed -%}
+            SUCCESSFUL
+          {%- elif result_verify_name.compartments[0].name is defined and result_delete_name.changed -%}
+            SUCCESSFUL
+          {%- else -%}
+            ESCALATED
+          {%- endif -%}
+
+##################################################################################
+## MOSTRAR EL RESULTADO FINAL
+
+    - name: Resultado cuando se elimina el compartimento en OCI por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ result_verify.compartments[0].name }}' has been deleted in OCI"
+              - "OCID: {{ compartment_id }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == false
+
+    - name: Resultado cuando se elimina el compartimento en OCI por su nombre
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ result_verify_name.compartments[0].name }}' has been deleted in OCI"
+              - "Parent OCID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "SUCCESSFUL" and activate_compartment_name | bool == true
+
+    - name: Resultado cuando el compartimento no existe por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_id }}' does not exist"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is not defined and activate_compartment_name | bool == false
+
+    - name: Resultado cuando existe un error al eliminar el compartimento por su ID
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error deleting the compartment '{{ compartment_id }}' "
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify.compartments[0].id is  defined and not verify_error | default(false) and not result_delete_id.changed and activate_compartment_name | bool == false
+
+    - name: Resultado cuando el compartimento por nombre no existe 
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_name }}' does not exist"
+              - "Parent OCID: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and activate_compartment_name | bool == true and not verify_error | default(false)
+
+    - name: Resultado cuando el ID del padre no es valida
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error renaming the compartment '{{ compartment_name }}' "
+              - "The parent ID is not valid: {{ tenancy }}"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is not defined and verify_error | default(false) and activate_compartment_name | bool == true
+
+    - name: Resultado cuando existe un error al eliminar el compartimento por su nombre
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "There was an error deleting the compartment '{{ compartment_name }}' "
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and result_verify_name.compartments[0].name is defined and not verify_error | default(false) and not result_delete_name.changed and activate_compartment_name | bool == true
+
+    - name: Resultado cuando existe un error durante toda la ejecucion
+      block:
+        - name: Muestra el resultado
+          debug:
+            msg:
+              - "RESULT-AUTOMATION"
+              - "-------------------------------------------------------"
+              - "Remediation Task Result is: {{ resultTarea }}"
+              - "The compartment '{{ compartment_id }}' could not be deleted"
+              - "Please contact your administrator"
+          ignore_errors: yes
+      when: resultTarea is defined and resultTarea == "ESCALATED" and ((result_verify.compartments[0].name is defined and not verify_error | default(false) and result_delete_id.changed) or (result_verify_name.compartments[0].name is defined and not verify_error | default(false) and result_delete_name.changed))
